@@ -6,6 +6,8 @@
 
 這個專案主打 **本地可跑**：前端是零依賴 vanilla JS，後端只用 Python 標準庫，文獻來源走 PubMed E-utilities，LLM 可接 LM Studio、OpenRouter，或其他 OpenAI-compatible endpoint。
 
+目前 M2 區網部署與開機自啟設定記錄在 [docs/m2-deployment.md](docs/m2-deployment.md)。
+
 ## Demo
 
 範例問題：**「生物素對落髮治療有幫助嗎？」**
