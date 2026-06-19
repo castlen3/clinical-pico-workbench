@@ -8,11 +8,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from threading import Lock
+from threading import Lock, Thread
 from typing import Any, Dict, List, Optional
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
+from uuid import uuid4
 from xml.etree import ElementTree as ET
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -50,6 +51,11 @@ LMSTUDIO_BASE_URL = os.environ.get(
 LMSTUDIO_MODEL = os.environ.get("LLM_MODEL", os.environ.get("LMSTUDIO_MODEL", "local-model"))
 LLM_API_KEY = os.environ.get("LLM_API_KEY", os.environ.get("OPENROUTER_API_KEY", "")).strip()
 APP_PORT = int(os.environ.get("APP_PORT", "9999"))
+JOB_RETENTION_SECONDS = max(300, int(os.environ.get("JOB_RETENTION_SECONDS", "7200")))
+PIPELINE_TOTAL_STEPS = 5
+MIN_DEEP_REVIEW_ARTICLES = 4
+_JOB_LOCK = Lock()
+_JOB_STORE: Dict[str, Dict[str, Any]] = {}
 
 
 def now_iso() -> str:
@@ -1267,9 +1273,397 @@ def openrouter_suggest_selection(
         return {"suggestions": heuristic, "source": "heuristic"}
 
 
+def apply_abstracts_to_articles(
+    articles: List[Dict[str, Any]], abstract_result: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    abs_map: Dict[str, Dict[str, Any]] = {}
+    for article in abstract_result.get("articles", []) or []:
+        if not isinstance(article, dict):
+            continue
+        pmid = clean_text(str(article.get("pmid", "")))
+        if pmid:
+            abs_map[pmid] = article
+
+    merged: List[Dict[str, Any]] = []
+    for article in articles:
+        pmid = clean_text(str(article.get("pmid", "")))
+        abstract = ""
+        if pmid and pmid in abs_map:
+            abstract = clean_text(str(abs_map[pmid].get("abstract", "")))
+        merged.append(
+            {
+                **article,
+                "abstract": abstract or clean_text(str(article.get("abstract", ""))),
+            }
+        )
+    return merged
+
+
+def compute_selected_pmids(
+    *,
+    question: str,
+    pico: Dict[str, Any],
+    query: str,
+    articles: List[Dict[str, Any]],
+) -> List[str]:
+    selected_pmids: List[str] = []
+    select_result = openrouter_suggest_selection(
+        question=question,
+        pico=pico,
+        query=query,
+        articles=articles,
+        mode="loose",
+    )
+    suggestions = select_result.get("suggestions") or []
+    if isinstance(suggestions, list):
+        for item in suggestions:
+            if not isinstance(item, dict):
+                continue
+            if item.get("recommend") or item.get("r"):
+                pmid = clean_text(str(item.get("pmid") or item.get("p") or ""))
+                if pmid:
+                    selected_pmids.append(pmid)
+    if not selected_pmids:
+        selected_pmids = [clean_text(str(a.get("pmid", ""))) for a in articles]
+
+    deduped: List[str] = []
+    for pmid in selected_pmids:
+        if pmid and pmid not in deduped:
+            deduped.append(pmid)
+    return deduped
+
+
+def pipeline_notice_result(
+    *,
+    notice_mode: str,
+    question: str,
+    pico: Dict[str, Any],
+    query: str,
+    time_filter: Dict[str, Any],
+    search_limit: int,
+    total_count: int,
+    articles: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    return {
+        "kind": "notice",
+        "noticeMode": notice_mode,
+        "question": question,
+        "pico": pico,
+        "query": query,
+        "timeFilter": build_time_filter(time_filter),
+        "searchLimit": search_limit,
+        "totalCount": total_count,
+        "articles": articles,
+        "selectedPmids": [],
+        "abstractSummary": "",
+        "finalAnswer": "",
+        "executedQuery": query,
+    }
+
+
+def pipeline_final_result(
+    *,
+    question: str,
+    pico: Dict[str, Any],
+    query: str,
+    time_filter: Dict[str, Any],
+    search_limit: int,
+    total_count: int,
+    articles: List[Dict[str, Any]],
+    selected_pmids: List[str],
+    abstract_summary: str,
+    final_answer: str,
+) -> Dict[str, Any]:
+    return {
+        "kind": "final",
+        "question": question,
+        "pico": pico,
+        "query": query,
+        "timeFilter": build_time_filter(time_filter),
+        "searchLimit": search_limit,
+        "totalCount": total_count,
+        "articles": articles,
+        "selectedPmids": selected_pmids,
+        "abstractSummary": abstract_summary,
+        "finalAnswer": final_answer,
+        "executedQuery": query,
+    }
+
+
+def prune_jobs() -> None:
+    now = time.time()
+    to_delete: List[str] = []
+    with _JOB_LOCK:
+        for job_id, job in _JOB_STORE.items():
+            updated_at = float(job.get("_updated_ts") or 0.0)
+            if updated_at and now - updated_at > JOB_RETENTION_SECONDS:
+                to_delete.append(job_id)
+        for job_id in to_delete:
+            _JOB_STORE.pop(job_id, None)
+
+
+def snapshot_job(job: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "jobId": job.get("jobId", ""),
+        "status": job.get("status", "unknown"),
+        "createdAt": job.get("createdAt"),
+        "startedAt": job.get("startedAt"),
+        "updatedAt": job.get("updatedAt"),
+        "finishedAt": job.get("finishedAt"),
+        "progress": dict(job.get("progress") or {}),
+        "result": job.get("result"),
+        "error": job.get("error"),
+    }
+
+
+def get_job(job_id: str) -> Optional[Dict[str, Any]]:
+    prune_jobs()
+    with _JOB_LOCK:
+        job = _JOB_STORE.get(job_id)
+        if not job:
+            return None
+        return snapshot_job(job)
+
+
+def _update_job(job_id: str, **fields: Any) -> None:
+    now = now_iso()
+    with _JOB_LOCK:
+        job = _JOB_STORE.get(job_id)
+        if not job:
+            return
+        job.update(fields)
+        job["updatedAt"] = now
+        job["_updated_ts"] = time.time()
+
+
+def set_job_progress(job_id: str, *, step: int, text: str, detail: str) -> None:
+    _update_job(
+        job_id,
+        status="running",
+        progress={
+            "step": step,
+            "total": PIPELINE_TOTAL_STEPS,
+            "text": text,
+            "detail": detail,
+        },
+    )
+
+
+def complete_job(job_id: str, result: Dict[str, Any]) -> None:
+    _update_job(
+        job_id,
+        status="completed",
+        finishedAt=now_iso(),
+        result=result,
+        error="",
+    )
+
+
+def fail_job(job_id: str, message: str) -> None:
+    _update_job(
+        job_id,
+        status="failed",
+        finishedAt=now_iso(),
+        error=clean_text(message) or "未知錯誤",
+    )
+
+
+def run_review_pipeline(
+    *,
+    question: str,
+    pico: Dict[str, Any],
+    query: str,
+    time_filter: Dict[str, Any],
+    search_limit: int,
+    allow_sparse: bool,
+    job_id: str,
+) -> Dict[str, Any]:
+    set_job_progress(
+        job_id,
+        step=1,
+        text="搜尋 PubMed",
+        detail=f"用目前查詢式抓前 {search_limit} 篇標題與期刊資訊",
+    )
+    search_result = pubmed_search(
+        query=query,
+        time_filter=time_filter,
+        retmax=search_limit,
+    )
+    articles = search_result.get("articles") or []
+    if not isinstance(articles, list):
+        articles = []
+    total_count = int(search_result.get("totalCount") or 0)
+
+    if not articles:
+        return pipeline_notice_result(
+            notice_mode="zero",
+            question=question,
+            pico=pico,
+            query=query,
+            time_filter=time_filter,
+            search_limit=search_limit,
+            total_count=total_count,
+            articles=[],
+        )
+
+    if len(articles) < MIN_DEEP_REVIEW_ARTICLES and not allow_sparse:
+        return pipeline_notice_result(
+            notice_mode="sparse",
+            question=question,
+            pico=pico,
+            query=query,
+            time_filter=time_filter,
+            search_limit=search_limit,
+            total_count=total_count,
+            articles=articles,
+        )
+
+    set_job_progress(
+        job_id,
+        step=2,
+        text="AI 標題篩選",
+        detail=f"只看 {len(articles)} 篇標題，先挑出最值得深讀的文獻",
+    )
+    selected_pmids = compute_selected_pmids(
+        question=question,
+        pico=pico,
+        query=query,
+        articles=articles,
+    )
+    set_job_progress(
+        job_id,
+        step=3,
+        text="抓取入選摘要",
+        detail=f"抓 {len(selected_pmids)} 篇摘要；標題初篩保留幾篇，就深讀幾篇",
+    )
+    abstract_result = pubmed_abstracts(pmids=selected_pmids)
+    merged_articles = apply_abstracts_to_articles(articles, abstract_result)
+
+    set_job_progress(
+        job_id,
+        step=4,
+        text="逐篇深讀",
+        detail=f"後端最多 4 線程並發分析 {len(selected_pmids)} 篇文獻",
+    )
+    selected_articles = [a for a in merged_articles if str(a.get("pmid", "")) in selected_pmids]
+    summary_result = openrouter_summarize_abstracts(
+        question=question,
+        pico=pico,
+        articles=selected_articles,
+    )
+    abstract_summary = json.dumps(summary_result.get("entries") or [], ensure_ascii=False)
+
+    set_job_progress(
+        job_id,
+        step=5,
+        text="產生最終結論",
+        detail="整合 PICO、入選摘要與檢索概況，輸出手機可讀報告",
+    )
+    review_result = openrouter_final_review(
+        question=question,
+        pico=pico,
+        query=query,
+        time_filter=time_filter,
+        abstract_summary=abstract_summary,
+        search_context={
+            "totalCount": total_count,
+            "displayedCount": len(merged_articles),
+            "selectedCount": len(selected_pmids),
+            "retmax": search_limit,
+            "filters": f"Top {search_limit}",
+            "previewArticles": [
+                {
+                    "pmid": a.get("pmid"),
+                    "year": a.get("year"),
+                    "journal": a.get("journal"),
+                    "title": a.get("title"),
+                }
+                for a in merged_articles[:search_limit]
+            ],
+        },
+    )
+
+    return pipeline_final_result(
+        question=question,
+        pico=pico,
+        query=query,
+        time_filter=time_filter,
+        search_limit=search_limit,
+        total_count=total_count,
+        articles=merged_articles,
+        selected_pmids=selected_pmids,
+        abstract_summary=abstract_summary,
+        final_answer=str(review_result.get("answer") or ""),
+    )
+
+
+def run_review_job(job_id: str, payload: Dict[str, Any]) -> None:
+    try:
+        question = str(payload.get("question") or "")
+        pico = payload.get("pico") or {}
+        query = str(payload.get("query") or "")
+        time_filter = payload.get("timeFilter") or {}
+        try:
+            search_limit = int(payload.get("retmax") or 10)
+        except (TypeError, ValueError):
+            search_limit = 10
+        allow_sparse = bool(payload.get("allowSparse"))
+        result = run_review_pipeline(
+            question=question,
+            pico=pico,
+            query=query,
+            time_filter=time_filter,
+            search_limit=search_limit,
+            allow_sparse=allow_sparse,
+            job_id=job_id,
+        )
+        complete_job(job_id, result)
+        log_event(f"review job completed job_id={job_id} kind={result.get('kind', '')}")
+    except Exception as e:
+        fail_job(job_id, str(e))
+        log_event(f"review job failed job_id={job_id} error={clean_text(str(e))}")
+
+
+def create_review_job(payload: Dict[str, Any]) -> Dict[str, Any]:
+    prune_jobs()
+    job_id = uuid4().hex
+    created_at = now_iso()
+    job = {
+        "jobId": job_id,
+        "status": "queued",
+        "createdAt": created_at,
+        "startedAt": created_at,
+        "updatedAt": created_at,
+        "finishedAt": None,
+        "progress": {
+            "step": 0,
+            "total": PIPELINE_TOTAL_STEPS,
+            "text": "處理中，請稍候...",
+            "detail": "正在準備流程",
+        },
+        "result": None,
+        "error": "",
+        "_updated_ts": time.time(),
+    }
+    with _JOB_LOCK:
+        _JOB_STORE[job_id] = job
+
+    worker = Thread(
+        target=run_review_job,
+        args=(job_id, dict(payload)),
+        daemon=True,
+    )
+    worker.start()
+    log_event(f"review job created job_id={job_id}")
+    return snapshot_job(job)
+
+
 class AppHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, directory=str(BASE_DIR), **kwargs)
+
+    def _request_path(self) -> str:
+        return urlparse(self.path).path
 
     def _read_json(self) -> Dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0") or "0")
@@ -1326,7 +1720,14 @@ class AppHandler(SimpleHTTPRequestHandler):
             return
 
         try:
-            if self.path == "/api/pubmed/search":
+            request_path = self._request_path()
+
+            if request_path == "/api/jobs/review":
+                job = create_review_job(payload)
+                self._send_json(202, job)
+                return
+
+            if request_path == "/api/pubmed/search":
                 query = str(payload.get("query") or "")
                 time_filter = payload.get("timeFilter") or {}
                 try:
@@ -1337,7 +1738,7 @@ class AppHandler(SimpleHTTPRequestHandler):
                 self._send_json(200, result)
                 return
 
-            if self.path == "/api/pubmed/abstracts":
+            if request_path == "/api/pubmed/abstracts":
                 pmids = payload.get("pmids") or []
                 if not isinstance(pmids, list):
                     raise ValueError("pmids 必須是陣列")
@@ -1345,7 +1746,7 @@ class AppHandler(SimpleHTTPRequestHandler):
                 self._send_json(200, result)
                 return
 
-            if self.path == "/api/openrouter/analyze":
+            if request_path == "/api/openrouter/analyze":
                 result = openrouter_analyze(
                     question=str(payload.get("question") or ""),
                     current_pico=payload.get("pico") or {},
@@ -1354,7 +1755,7 @@ class AppHandler(SimpleHTTPRequestHandler):
                 self._send_json(200, result)
                 return
 
-            if self.path == "/api/openrouter/summarize-abstracts":
+            if request_path == "/api/openrouter/summarize-abstracts":
                 articles = payload.get("articles") or []
                 if not isinstance(articles, list):
                     raise ValueError("articles 必須是陣列")
@@ -1366,7 +1767,7 @@ class AppHandler(SimpleHTTPRequestHandler):
                 self._send_json(200, result)
                 return
 
-            if self.path == "/api/openrouter/final-review":
+            if request_path == "/api/openrouter/final-review":
                 raw_search_context = payload.get("searchContext") or {}
                 if not isinstance(raw_search_context, dict):
                     raw_search_context = {}
@@ -1381,7 +1782,7 @@ class AppHandler(SimpleHTTPRequestHandler):
                 self._send_json(200, result)
                 return
 
-            if self.path == "/api/openrouter/query-optimizer":
+            if request_path == "/api/openrouter/query-optimizer":
                 raw_search_context = payload.get("searchContext") or {}
                 if not isinstance(raw_search_context, dict):
                     raw_search_context = {}
@@ -1397,7 +1798,7 @@ class AppHandler(SimpleHTTPRequestHandler):
                 self._send_json(200, result)
                 return
 
-            if self.path == "/api/openrouter/suggest-selection":
+            if request_path == "/api/openrouter/suggest-selection":
                 articles = payload.get("articles") or []
                 if not isinstance(articles, list):
                     raise ValueError("articles 必須是陣列")
@@ -1411,7 +1812,7 @@ class AppHandler(SimpleHTTPRequestHandler):
                 self._send_json(200, result)
                 return
 
-            if self.path == "/api/openrouter/translate-title":
+            if request_path == "/api/openrouter/translate-title":
                 result = openrouter_translate_title(
                     title=str(payload.get("title") or ""),
                 )
@@ -1436,7 +1837,18 @@ class AppHandler(SimpleHTTPRequestHandler):
             self._send_error(500, "伺服器內部錯誤", str(e))
 
     def do_GET(self) -> None:  # noqa: N802
-        if self.path == "/api/health":
+        request_path = self._request_path()
+
+        if request_path.startswith("/api/jobs/"):
+            job_id = clean_text(request_path.rsplit("/", 1)[-1])
+            job = get_job(job_id)
+            if not job:
+                self._send_error(404, "找不到 job")
+                return
+            self._send_json(200, job)
+            return
+
+        if request_path == "/api/health":
             lm_status = "unknown"
             lm_model = LMSTUDIO_MODEL
             try:

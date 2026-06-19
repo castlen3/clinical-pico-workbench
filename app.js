@@ -5,10 +5,11 @@
    ============================================================ */
 
 const STORAGE_KEY = 'pico_workbench_v2';
+const RUN_STATE_KEY = 'pico_workbench_run_v1';
 const HEALTH_POLL_MS = 60000;
+const JOB_POLL_MS = 2500;
 const DEFAULT_SEARCH_LIMIT = 8;
 const MIN_DEEP_REVIEW_ARTICLES = 4;
-const MAX_DEEP_REVIEW_ARTICLES = 8;
 const APP_BASE_PATH = (() => {
   const path = window.location.pathname || '/';
   return path.endsWith('/') ? path : path.replace(/\/[^/]*$/, '/');
@@ -16,6 +17,11 @@ const APP_BASE_PATH = (() => {
 
 function appUrl(path) {
   return `${APP_BASE_PATH}${String(path || '').replace(/^\/+/, '')}`;
+}
+
+function effectiveSearchLimit(value) {
+  const parsed = parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : DEFAULT_SEARCH_LIMIT;
 }
 
 /* ---------- State ---------- */
@@ -37,6 +43,11 @@ const state = {
 const $ = {};
 let loadingStartedAt = 0;
 let loadingTimer = null;
+let activeRunId = null;
+let activeJobId = null;
+let jobPollTimer = null;
+let jobPollInFlight = false;
+let jobPollErrorCount = 0;
 
 /* ============================================================
    DOM References
@@ -137,10 +148,92 @@ function hideLoading() {
   $.loadingOverlay.style.display = 'none';
 }
 
+function persistRunState(data) {
+  try {
+    localStorage.setItem(RUN_STATE_KEY, JSON.stringify(data));
+  } catch {}
+}
+
+function stopJobPolling() {
+  if (jobPollTimer) clearInterval(jobPollTimer);
+  jobPollTimer = null;
+  jobPollInFlight = false;
+  jobPollErrorCount = 0;
+}
+
+function clearRunState() {
+  stopJobPolling();
+  activeRunId = null;
+  activeJobId = null;
+  try {
+    localStorage.removeItem(RUN_STATE_KEY);
+  } catch {}
+}
+
+function startRunState() {
+  activeRunId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  activeJobId = null;
+  persistRunState({
+    runId: activeRunId,
+    startedAt: Date.now(),
+    question: state.question,
+    query: state.query,
+    fromYear: state.fromYear,
+    searchLimit: state.searchLimit,
+    jobId: null,
+    step: 0,
+    loadingText: '處理中，請稍候...',
+    loadingDetail: '正在準備流程',
+  });
+}
+
+function updateRunState(patch = {}) {
+  if (!activeRunId) return;
+  let current = {};
+  try {
+    current = JSON.parse(localStorage.getItem(RUN_STATE_KEY) || '{}') || {};
+  } catch {}
+  persistRunState({
+    ...current,
+    ...patch,
+    runId: activeRunId,
+  });
+}
+
+function restoreRunStateIfNeeded() {
+  let saved = null;
+  try {
+    saved = JSON.parse(localStorage.getItem(RUN_STATE_KEY) || 'null');
+  } catch {}
+  if (!saved || !saved.runId) return;
+  activeRunId = saved.runId;
+  activeJobId = saved.jobId || null;
+  startLoadingTimer();
+  $.loadingOverlay.style.display = 'flex';
+  $.loadingText.innerHTML = saved.loadingText || '處理中，請稍候...';
+  if ($.loadingDetail) {
+    $.loadingDetail.textContent = saved.loadingDetail || '上一輪執行中，請稍候，不會自動重跑';
+  }
+  if ($.loadingElapsed && saved.startedAt) {
+    loadingStartedAt = saved.startedAt;
+    updateLoadingElapsed();
+  }
+  if (saved.question) state.question = saved.question;
+  if (saved.query) state.query = saved.query;
+  if (saved.fromYear) state.fromYear = saved.fromYear;
+  if (saved.searchLimit) state.searchLimit = effectiveSearchLimit(saved.searchLimit);
+  syncSearchFormFromState();
+  $.picoResult.style.display = state.query ? 'block' : 'none';
+  $.analyzeBtn.textContent = state.query ? '重新分析' : '分析問題';
+}
+
 /* ============================================================
    Error Handling
    ============================================================ */
-function showError(msg) {
+function showError(msg, options = {}) {
+  if (options.clearRunState !== false) {
+    clearRunState();
+  }
   $.errorMessage.textContent = friendlyErrorMessage(msg);
   $.errorPanel.style.display = 'flex';
 }
@@ -218,6 +311,13 @@ async function apiPost(url, body) {
   return data;
 }
 
+async function apiGet(url) {
+  const res = await fetch(appUrl(url));
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  return data;
+}
+
 function getTimeFilter() {
   const val = state.fromYear || '5';
   const today = new Date();
@@ -232,8 +332,142 @@ function getTimeFilter() {
    Core Flow: Analyze → Search → AI Select → Summarize → Report
    ============================================================ */
 
+function syncStateFromPipelineResult(result = {}) {
+  state.question = result.question || state.question;
+  state.pico = result.pico || state.pico;
+  state.query = result.query || state.query;
+  state.executedQuery = result.executedQuery || result.query || state.query;
+  state.articles = Array.isArray(result.articles) ? result.articles : [];
+  state.selectedPmids = Array.isArray(result.selectedPmids) ? result.selectedPmids : [];
+  state.abstractSummary = result.abstractSummary || '';
+  state.finalAnswer = result.finalAnswer || '';
+  state.totalCount = result.totalCount || 0;
+  state.searchLimit = effectiveSearchLimit(result.searchLimit || state.searchLimit || DEFAULT_SEARCH_LIMIT);
+  if (result.timeFilter && result.timeFilter.mode === 'all') {
+    state.fromYear = 'all';
+  }
+}
+
+function applyCompletedResult(result = {}) {
+  syncStateFromPipelineResult(result);
+  syncSearchFormFromState();
+  $.picoResult.style.display = 'block';
+  $.analyzeBtn.textContent = '重新分析';
+  hideSearchNotice();
+  renderResults();
+  goToStep(2);
+  saveState();
+}
+
+function applyNoticeResult(result = {}) {
+  syncStateFromPipelineResult(result);
+  syncSearchFormFromState();
+  $.picoResult.style.display = 'block';
+  $.analyzeBtn.textContent = '重新分析';
+  hideLoading();
+  showSearchNotice({
+    totalCount: state.totalCount,
+    displayedCount: state.articles.length,
+    mode: result.noticeMode || 'sparse',
+  });
+  goToStep(1);
+  saveState();
+}
+
+function applyJobProgress(progress = {}, startedAt = null) {
+  const step = parseInt(progress.step, 10) || 0;
+  const total = parseInt(progress.total, 10) || 5;
+  const text = progress.text || '處理中，請稍候...';
+  const detail = progress.detail || '正在準備流程';
+  if (step > 0) {
+    showProgress(step, total, text, detail);
+    updateRunState({
+      jobId: activeJobId,
+      startedAt: startedAt || Date.now(),
+      step,
+      loadingText: `<span class="progress-step">${step}/${total}</span> ${escapeHtml(text)}`,
+      loadingDetail: detail,
+    });
+  } else {
+    showLoading(text);
+    if ($.loadingDetail) $.loadingDetail.textContent = detail;
+    updateRunState({
+      jobId: activeJobId,
+      startedAt: startedAt || Date.now(),
+      step: 0,
+      loadingText: text,
+      loadingDetail: detail,
+    });
+  }
+  if ($.loadingElapsed && startedAt) {
+    loadingStartedAt = startedAt;
+    updateLoadingElapsed();
+  }
+}
+
+function showReconnectState(err) {
+  const detail = jobPollErrorCount <= 1
+    ? '手機剛恢復或網路暫時中斷，正在重新連線；後端會繼續跑，不會重送。'
+    : `正在重新連線（第 ${jobPollErrorCount} 次）；後端若已完成，抓到結果後會直接顯示。`;
+  startLoadingTimer();
+  $.loadingOverlay.style.display = 'flex';
+  if ($.loadingDetail) $.loadingDetail.textContent = detail;
+  updateRunState({
+    jobId: activeJobId,
+    loadingDetail: detail,
+  });
+  console.warn('job poll reconnecting', err);
+}
+
+async function pollJobStatus() {
+  if (!activeJobId || jobPollInFlight) return;
+  jobPollInFlight = true;
+  try {
+    const job = await apiGet(`/api/jobs/${activeJobId}`);
+    jobPollErrorCount = 0;
+    const progress = job.progress || {};
+    applyJobProgress(progress, job.startedAt ? Date.parse(job.startedAt) : null);
+
+    if (job.status === 'completed') {
+      const result = job.result || {};
+      clearRunState();
+      hideLoading();
+      if (result.kind === 'notice') {
+        applyNoticeResult(result);
+        return;
+      }
+      applyCompletedResult(result);
+      return;
+    }
+
+    if (job.status === 'failed') {
+      hideLoading();
+      showError(`查詢失敗：${job.error || '背景工作失敗'}`);
+    }
+  } catch (err) {
+    jobPollErrorCount += 1;
+    showReconnectState(err);
+  } finally {
+    jobPollInFlight = false;
+  }
+}
+
+function startJobPolling(jobId) {
+  activeJobId = jobId;
+  updateRunState({ jobId });
+  stopJobPolling();
+  pollJobStatus();
+  jobPollTimer = setInterval(() => {
+    pollJobStatus();
+  }, JOB_POLL_MS);
+}
+
 // Step 1: Analyze question → show PICO
 async function analyze() {
+  if (activeRunId) {
+    showError('上一輪流程仍在執行或結果尚未確認，請稍候，不會自動重跑。', { clearRunState: false });
+    return;
+  }
   const q = $.question.value.trim();
   if (!q) { showError('請輸入臨床問題'); return; }
   state.question = q;
@@ -255,10 +489,17 @@ async function analyze() {
     $.picoC.value = state.pico.c;
     $.picoO.value = state.pico.o;
     $.query.value = state.query;
+    state.articles = [];
+    state.selectedPmids = [];
+    state.abstractSummary = '';
+    state.finalAnswer = '';
+    state.totalCount = 0;
+    state.executedQuery = '';
 
     // Show PICO card
     $.picoResult.style.display = 'block';
     $.analyzeBtn.textContent = '重新分析';
+    saveState();
     hideLoading();
   } catch (err) {
     hideLoading();
@@ -268,6 +509,10 @@ async function analyze() {
 
 // Step 1→2: Confirm & Search → auto-chain with parallel burst
 async function confirmAndSearch(options = {}) {
+  if (activeRunId) {
+    showError('上一輪流程仍在執行或結果尚未確認，請稍候，不會自動重跑。', { clearRunState: false });
+    return;
+  }
   const allowSparse = Boolean(options.allowSparse);
   // Sync from form
   state.pico.p = $.picoP.value.trim();
@@ -275,138 +520,38 @@ async function confirmAndSearch(options = {}) {
   state.pico.c = $.picoC.value.trim();
   state.pico.o = $.picoO.value.trim();
   state.query = $.query.value.trim();
-  state.searchLimit = parseInt($.searchLimit.value) || DEFAULT_SEARCH_LIMIT;
+  state.searchLimit = effectiveSearchLimit($.searchLimit.value);
+  $.searchLimit.value = String(state.searchLimit);
+  state.articles = [];
+  state.selectedPmids = [];
+  state.abstractSummary = '';
+  state.finalAnswer = '';
+  state.totalCount = 0;
+  state.executedQuery = '';
 
   if (!state.query) { showError('請填寫查詢式'); return; }
   hideSearchNotice();
-
-  const TOTAL = 5;
-  showProgress(1, TOTAL, '搜尋 PubMed', `用目前查詢式抓前 ${state.searchLimit} 篇標題與期刊資訊`);
+  startRunState();
+  saveState();
+  applyJobProgress({
+    step: 0,
+    total: 5,
+    text: '建立背景工作',
+    detail: '手機休眠後仍會繼續執行，醒來會自動接回進度',
+  }, Date.now());
   try {
-    // === Step 1: Search PubMed ===
-    const searchResult = await apiPost('/api/pubmed/search', {
+    const job = await apiPost('/api/jobs/review', {
+      question: state.question,
+      pico: state.pico,
       query: state.query,
       timeFilter: getTimeFilter(),
       retmax: state.searchLimit,
+      allowSparse,
     });
-    state.articles = searchResult.articles || [];
-    state.totalCount = searchResult.totalCount || 0;
-    state.executedQuery = state.query;
-
-    if (state.articles.length === 0) {
-      hideLoading();
-      showSearchNotice({
-        totalCount: state.totalCount,
-        displayedCount: 0,
-        mode: 'zero',
-      });
-      $.picoResult.style.display = 'block';
-      goToStep(1);
-      saveState();
-      return;
+    if (!job.jobId) {
+      throw new Error('背景工作建立失敗');
     }
-
-    if (state.articles.length < MIN_DEEP_REVIEW_ARTICLES && !allowSparse) {
-      hideLoading();
-      showSearchNotice({
-        totalCount: state.totalCount,
-        displayedCount: state.articles.length,
-        mode: 'sparse',
-      });
-      $.picoResult.style.display = 'block';
-      goToStep(1);
-      saveState();
-      return;
-    }
-
-    // === Step 2: AI select by titles only ===
-    showProgress(2, TOTAL, 'AI 標題篩選', `只看 ${state.articles.length} 篇標題，先挑出最值得深讀的文獻`);
-    const selectResult = await Promise.allSettled([
-      apiPost('/api/openrouter/suggest-selection', {
-        question: state.question,
-        pico: state.pico,
-        query: state.query,
-        articles: state.articles,
-        mode: 'loose',
-      }),
-    ]);
-
-    // Process AI selection
-    let selectedPmids = [];
-    if (selectResult[0].status === 'fulfilled') {
-      const suggestions = selectResult[0].value.suggestions || [];
-      if (Array.isArray(suggestions)) {
-        selectedPmids = suggestions
-          .filter(s => s.recommend || s.r)
-          .map(s => s.pmid || s.p);
-      }
-    }
-    if (selectedPmids.length === 0) {
-      selectedPmids = state.articles.slice(0, 3).map(a => a.pmid);
-    }
-    selectedPmids = selectedPmids
-      .filter(Boolean)
-      .filter((pmid, idx, arr) => arr.indexOf(pmid) === idx)
-      .slice(0, MAX_DEEP_REVIEW_ARTICLES);
-    for (const article of state.articles) {
-      if (selectedPmids.length >= Math.min(MIN_DEEP_REVIEW_ARTICLES, state.articles.length)) break;
-      if (article.pmid && !selectedPmids.includes(article.pmid)) {
-        selectedPmids.push(article.pmid);
-      }
-    }
-    state.selectedPmids = selectedPmids;
-
-    // === Step 3: Fetch abstracts only for selected articles ===
-    showProgress(3, TOTAL, '抓取入選摘要', `抓 ${selectedPmids.length} 篇摘要；AI 勾選不足 4 篇時會用 PubMed 排名前段補足`);
-    const abstractResult = await apiPost('/api/pubmed/abstracts', {
-      pmids: selectedPmids,
-    });
-    if (abstractResult) {
-      const absMap = {};
-      (abstractResult.articles || []).forEach(a => { absMap[a.pmid] = a; });
-      state.articles = state.articles.map(a => ({
-        ...a,
-        abstract: absMap[a.pmid]?.abstract || a.abstract || '',
-      }));
-    }
-
-    // === Step 4: Summarize selected articles ===
-    showProgress(4, TOTAL, '逐篇深讀', `後端最多 4 線程並發分析 ${selectedPmids.length} 篇文獻`);
-    const selectedArticles = state.articles.filter(a => selectedPmids.includes(a.pmid));
-    const summaryResult = await apiPost('/api/openrouter/summarize-abstracts', {
-      question: state.question,
-      pico: state.pico,
-      articles: selectedArticles,
-    });
-    state.abstractSummary = JSON.stringify(summaryResult.entries || []);
-
-    // === Step 5: Final review ===
-    showProgress(5, TOTAL, '產生最終結論', '整合 PICO、入選摘要與檢索概況，輸出手機可讀報告');
-    const reviewResult = await apiPost('/api/openrouter/final-review', {
-      question: state.question,
-      pico: state.pico,
-      query: state.query,
-      timeFilter: getTimeFilter(),
-      abstractSummary: state.abstractSummary,
-      searchContext: {
-        totalCount: state.totalCount,
-        displayedCount: state.articles.length,
-        selectedCount: selectedPmids.length,
-        retmax: state.searchLimit,
-        filters: `Top ${state.searchLimit}`,
-        previewArticles: state.articles.slice(0, state.searchLimit).map(a => ({
-          pmid: a.pmid, year: a.year, journal: a.journal, title: a.title,
-        })),
-      },
-    });
-    state.finalAnswer = reviewResult.answer || '';
-
-    // Done!
-    hideLoading();
-    renderResults();
-    goToStep(2);
-    saveState();
-
+    startJobPolling(job.jobId);
   } catch (err) {
     hideLoading();
     showError(`查詢失敗：${err.message}`);
@@ -424,6 +569,9 @@ function renderResults() {
   if (state.finalAnswer) {
     $.finalAnswer.innerHTML = formatReport(state.finalAnswer);
     $.finalAnswerCard.style.display = 'block';
+  } else {
+    $.finalAnswer.innerHTML = '';
+    $.finalAnswerCard.style.display = 'none';
   }
 
   // Selected articles list
@@ -437,6 +585,9 @@ function renderResults() {
       </div>
     `).join('');
     $.articlesCard.style.display = 'block';
+  } else {
+    $.articleList.innerHTML = '';
+    $.articlesCard.style.display = 'none';
   }
 
   // PMID links
@@ -447,6 +598,9 @@ function renderResults() {
       return `<a href="https://pubmed.ncbi.nlm.nih.gov/${pmid}/" target="_blank" class="pmid-link">PMID ${pmid} (${escapeHtml(label)})</a>`;
     }).join('');
     $.pmidLinksCard.style.display = 'block';
+  } else {
+    $.pmidLinks.innerHTML = '';
+    $.pmidLinksCard.style.display = 'none';
   }
 }
 
@@ -471,7 +625,8 @@ function syncSearchFormFromState() {
   $.picoC.value = state.pico.c || '';
   $.picoO.value = state.pico.o || '';
   $.query.value = state.query || '';
-  $.searchLimit.value = String(state.searchLimit || DEFAULT_SEARCH_LIMIT);
+  state.searchLimit = effectiveSearchLimit(state.searchLimit || DEFAULT_SEARCH_LIMIT);
+  $.searchLimit.value = String(state.searchLimit);
   setTimeFilterValue(state.fromYear || '5');
 }
 
@@ -487,6 +642,7 @@ function retrySearch() {
 }
 
 function newQuestion() {
+  clearRunState();
   state.question = '';
   state.pico = { p: '', i: '', c: '', o: '' };
   state.query = '';
@@ -494,10 +650,13 @@ function newQuestion() {
   state.selectedPmids = [];
   state.abstractSummary = '';
   state.finalAnswer = '';
+  state.totalCount = 0;
+  state.executedQuery = '';
   $.question.value = '';
   hideSearchNotice();
   $.picoResult.style.display = 'none';
   $.analyzeBtn.textContent = '分析問題';
+  renderResults();
   goToStep(1);
   saveState();
 }
@@ -581,7 +740,10 @@ function makeFilenameSlug(text) {
 }
 
 function downloadTextFile(filename, content, type) {
-  const blob = new Blob([content], { type });
+  // Add UTF-8 BOM so mobile file viewers are less likely to mis-detect
+  // Traditional Chinese Markdown as a legacy encoding.
+  const utf8Bom = new Uint8Array([0xEF, 0xBB, 0xBF]);
+  const blob = new Blob([utf8Bom, content], { type });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
@@ -601,6 +763,9 @@ function saveState() {
       query: state.query,
       fromYear: state.fromYear,
       searchLimit: state.searchLimit,
+      articles: state.articles,
+      abstractSummary: state.abstractSummary,
+      executedQuery: state.executedQuery,
       finalAnswer: state.finalAnswer,
       selectedPmids: state.selectedPmids,
       totalCount: state.totalCount,
@@ -616,7 +781,10 @@ function loadState() {
       state.pico = saved.pico || state.pico;
       state.query = saved.query || '';
       state.fromYear = saved.fromYear || '5';
-      state.searchLimit = saved.searchLimit || DEFAULT_SEARCH_LIMIT;
+      state.searchLimit = effectiveSearchLimit(saved.searchLimit || DEFAULT_SEARCH_LIMIT);
+      state.articles = saved.articles || [];
+      state.abstractSummary = saved.abstractSummary || '';
+      state.executedQuery = saved.executedQuery || '';
       state.finalAnswer = saved.finalAnswer || '';
       state.selectedPmids = saved.selectedPmids || [];
       state.totalCount = saved.totalCount || 0;
@@ -683,6 +851,22 @@ function bindEvents() {
       }
     }
   });
+
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && activeJobId) {
+      pollJobStatus();
+    }
+  });
+  window.addEventListener('pageshow', () => {
+    if (activeJobId) {
+      pollJobStatus();
+    }
+  });
+  window.addEventListener('online', () => {
+    if (activeJobId) {
+      pollJobStatus();
+    }
+  });
 }
 
 /* ============================================================
@@ -691,6 +875,10 @@ function bindEvents() {
 function init() {
   cacheElements();
   loadState();
+  restoreRunStateIfNeeded();
+  if (activeJobId) {
+    startJobPolling(activeJobId);
+  }
   checkHealth();
   setInterval(checkHealth, HEALTH_POLL_MS);
 }
