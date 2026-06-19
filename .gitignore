@@ -1,0 +1,13 @@
+.DS_Store
+*.log
+*.pid
+.pico_start.lock/
+.demo_tunnel.pid
+.pico_server.pid
+.pico_demo_server.pid
+.lite_demo_usage.json
+.env
+.env.local
+__pycache__/
+*.py[cod]
+

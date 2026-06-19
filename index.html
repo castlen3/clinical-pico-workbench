@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>臨床 PICO 工作台</title>
+  <link rel="stylesheet" href="./styles.css?v=20260619-low-results">
+</head>
+<body>
+  <div id="app" class="app-container">
+
+    <!-- Top bar -->
+    <header class="topbar">
+      <div class="topbar-left">
+        <span class="app-title">PICO 工作台</span>
+      </div>
+      <div class="topbar-right">
+        <span id="health-indicator" class="health-indicator">
+          <span class="health-dot checking"></span>
+          <span class="health-text">檢查中</span>
+        </span>
+      </div>
+    </header>
+
+    <!-- Main content area -->
+    <main class="main-content">
+
+      <!-- Step 1: Input question -->
+      <section class="step active" data-step="1">
+        <div class="step-header">
+          <h2>輸入臨床問題</h2>
+          <p class="step-hint">用一句話描述你想查的問題</p>
+        </div>
+        <div class="card">
+          <div class="form-group">
+            <textarea id="question" class="form-input" rows="4" placeholder="例如：metformin 對成人癌症發生率是否有幫助？"></textarea>
+          </div>
+          <button id="analyze-btn" class="btn btn-primary btn-block">分析問題</button>
+        </div>
+
+        <!-- PICO result (hidden until analysis done) -->
+        <div id="pico-result" class="card" style="display:none">
+          <div class="form-group">
+            <label>AI 建議 PubMed 查詢式</label>
+            <textarea id="query" class="form-input" rows="3"></textarea>
+          </div>
+          <div class="form-row">
+            <div class="form-group form-group-half">
+              <label>時間範圍</label>
+              <div class="pills">
+                <button class="pill" data-years="2">近 2 年</button>
+                <button class="pill active" data-years="5">近 5 年</button>
+                <button class="pill" data-years="10">近 10 年</button>
+                <button class="pill" data-years="all">不限</button>
+              </div>
+            </div>
+            <div class="form-group form-group-half">
+              <label>篇數</label>
+              <select id="search-limit" class="form-input">
+                <option value="5">前 5 篇</option>
+                <option value="8" selected>前 8 篇（建議）</option>
+                <option value="10">前 10 篇</option>
+                <option value="20">前 20 篇</option>
+                <option value="30">前 30 篇</option>
+                <option value="50">前 50 篇</option>
+              </select>
+            </div>
+          </div>
+
+          <details class="advanced-pico">
+            <summary>調整 PICO（進階，可不填）</summary>
+            <div class="pico-grid">
+              <div class="form-group">
+                <label>P（族群）</label>
+                <input id="pico-p" class="form-input" type="text">
+              </div>
+              <div class="form-group">
+                <label>I（介入）</label>
+                <input id="pico-i" class="form-input" type="text">
+              </div>
+              <div class="form-group">
+                <label>C（比較）</label>
+                <input id="pico-c" class="form-input" type="text">
+              </div>
+              <div class="form-group">
+                <label>O（結果）</label>
+                <input id="pico-o" class="form-input" type="text">
+              </div>
+            </div>
+          </details>
+
+          <div id="search-notice" class="search-notice" style="display:none">
+            <div id="search-notice-title" class="search-notice-title"></div>
+            <p id="search-notice-message" class="search-notice-message"></p>
+            <div class="search-notice-actions">
+              <button id="notice-10y-btn" class="btn btn-secondary btn-block" type="button">改近 10 年再查</button>
+              <button id="notice-all-btn" class="btn btn-secondary btn-block" type="button">改不限年份再查</button>
+              <button id="notice-continue-btn" class="btn btn-outline btn-block" type="button">仍用目前結果分析</button>
+            </div>
+          </div>
+
+          <button id="confirm-search-btn" class="btn btn-primary btn-block">確認並搜尋 PubMed</button>
+        </div>
+      </section>
+
+      <!-- Step 2: Results -->
+      <section class="step" data-step="2">
+        <div class="step-header">
+          <h2>查詢結果</h2>
+          <p id="result-summary" class="step-hint"></p>
+        </div>
+
+        <div id="final-answer-card" class="card">
+          <label class="card-label">AI 分析報告</label>
+          <div id="final-answer" class="report-content"></div>
+        </div>
+
+        <div id="articles-card" class="card" style="display:none">
+          <label class="card-label">納入文獻</label>
+          <div id="article-list" class="article-list"></div>
+        </div>
+
+        <div id="pmid-links-card" class="card" style="display:none">
+          <label class="card-label">PubMed 連結</label>
+          <div id="pmid-links" class="pmid-links"></div>
+        </div>
+
+        <div class="action-buttons">
+          <button id="retry-btn" class="btn btn-secondary btn-block">調整條件再查</button>
+          <button id="new-question-btn" class="btn btn-outline btn-block">新問題</button>
+          <button id="export-btn" class="btn btn-outline btn-block">匯出 Markdown</button>
+        </div>
+      </section>
+
+    </main>
+
+    <!-- Loading overlay -->
+    <div id="loading-overlay" class="loading-overlay" style="display:none">
+      <div class="loading-content">
+        <div class="spinner"></div>
+        <p id="loading-text" class="loading-text">處理中，請稍候...</p>
+        <p id="loading-detail" class="loading-detail">正在準備流程</p>
+        <div class="progress-track">
+          <div id="progress-bar-fill" class="progress-fill"></div>
+        </div>
+        <p id="loading-elapsed" class="loading-sub">已執行 0 秒</p>
+        <p class="loading-sub">本機 AI 會以最多 4 線程處理入選文獻</p>
+      </div>
+    </div>
+
+    <!-- Error panel -->
+    <div id="error-panel" class="error-panel" style="display:none">
+      <div class="error-content">
+        <div class="error-kicker">需要調整一下</div>
+        <h3>這一步還沒完成</h3>
+        <p id="error-message"></p>
+        <button id="error-dismiss" class="btn btn-secondary btn-block">回去調整</button>
+      </div>
+    </div>
+
+  </div>
+  <script src="./app.js?v=20260619-md-export"></script>
+</body>
+</html>

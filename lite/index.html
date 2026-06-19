@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PubMed 醫療建議助理 Lite</title>
+    <link rel="stylesheet" href="./lite.css" />
+  </head>
+  <body>
+    <main class="lite-wrap">
+      <header class="lite-head">
+        <h1>PubMed 醫療建議助理</h1>
+        <p>輸入問題後，用預設流程一路跑到最終結論。</p>
+      </header>
+
+      <section class="card">
+        <label for="api-key">OpenRouter API Key</label>
+        <input id="api-key" type="password" placeholder="sk-or-v1-..." />
+
+        <label for="model">AI 模型（單一模型跑到底）</label>
+        <input id="model" class="model-default" type="text" value="google/gemini-2.5-flash-lite" />
+        <div class="actions">
+          <button id="btn-save-settings" class="btn">儲存設定</button>
+        </div>
+
+        <label for="question">臨床醫療問題</label>
+        <textarea id="question" rows="4" placeholder="例如：metformin 對成人癌症發生率是否有幫助？"></textarea>
+
+        <div class="actions">
+          <button id="btn-analyze" class="btn btn-primary">分析問題並產出關鍵字</button>
+        </div>
+      </section>
+
+      <section class="card" id="preview-card" hidden>
+        <h2>本輪 PICO 與關鍵搜尋</h2>
+        <div class="kv"><strong>P:</strong> <span id="pico-p"></span></div>
+        <div class="kv"><strong>I:</strong> <span id="pico-i"></span></div>
+        <div class="kv"><strong>C:</strong> <span id="pico-c"></span></div>
+        <div class="kv"><strong>O:</strong> <span id="pico-o"></span></div>
+        <div class="actions">
+          <button id="btn-run" class="btn btn-primary" disabled>同意，開始自動流程</button>
+        </div>
+
+        <label for="query">PubMed 查詢式</label>
+        <div class="field-hint">可手動修改</div>
+        <textarea id="query" rows="4"></textarea>
+      </section>
+
+      <section class="card" id="status-card">
+        <div class="status-pill">
+          <span id="status-dot" class="dot idle" aria-hidden="true"></span>
+          <strong id="status-text">待命</strong>
+          <span id="status-elapsed" class="elapsed"></span>
+        </div>
+        <div id="status-note" class="status-note">流程：分析 -> 搜尋前15篇 -> AI寬鬆勾選 -> 摘要抓取 -> 最終評讀</div>
+      </section>
+
+      <section class="card" id="zero-card" hidden>
+        <h2>搜尋結果為 0 篇</h2>
+        <p>可以先修改問題重跑，或先手動移除部分 AND 再重跑。</p>
+        <div class="actions">
+          <button id="btn-reanalyze" class="btn">修改問題後重新分析</button>
+          <button id="btn-loosen-and" class="btn">移除部分 AND 後重跑</button>
+          <button id="btn-rerun-search" class="btn btn-primary">用目前查詢式重跑</button>
+        </div>
+      </section>
+
+      <section class="card" id="final-card" hidden>
+        <h2>最終結論</h2>
+        <div id="meta" class="meta"></div>
+        <textarea id="final-answer" rows="18" readonly placeholder="最終報告會顯示在這裡"></textarea>
+      </section>
+
+      <section class="card error" id="error-card" hidden>
+        <h2>錯誤訊息</h2>
+        <textarea id="error-text" rows="8" readonly></textarea>
+      </section>
+    </main>
+
+    <script src="./lite.js"></script>
+  </body>
+</html>
