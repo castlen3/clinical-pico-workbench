@@ -10,4 +10,6 @@
 .env.local
 __pycache__/
 *.py[cod]
-
+HANDOFF.md
+deploy_m2_public.command
+docs/m2-deployment.md
