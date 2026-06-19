@@ -10,6 +10,7 @@ const HEALTH_POLL_MS = 60000;
 const JOB_POLL_MS = 2500;
 const DEFAULT_SEARCH_LIMIT = 8;
 const MIN_DEEP_REVIEW_ARTICLES = 4;
+const HUMANS_FILTER_TERM = 'humans[MeSH Terms]';
 const APP_BASE_PATH = (() => {
   const path = window.location.pathname || '/';
   return path.endsWith('/') ? path : path.replace(/\/[^/]*$/, '/');
@@ -56,11 +57,8 @@ function cacheElements() {
   $.question = document.getElementById('question');
   $.analyzeBtn = document.getElementById('analyze-btn');
   $.picoResult = document.getElementById('pico-result');
-  $.picoP = document.getElementById('pico-p');
-  $.picoI = document.getElementById('pico-i');
-  $.picoC = document.getElementById('pico-c');
-  $.picoO = document.getElementById('pico-o');
   $.query = document.getElementById('query');
+  $.humansOnly = document.getElementById('humans-only');
   $.searchLimit = document.getElementById('search-limit');
   $.confirmSearchBtn = document.getElementById('confirm-search-btn');
   $.searchNotice = document.getElementById('search-notice');
@@ -328,6 +326,45 @@ function getTimeFilter() {
   return { mode: 'custom', fromYear: today.getFullYear() - years, toDate };
 }
 
+function escapeRegex(text) {
+  return String(text || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function hasHumansFilter(query) {
+  return String(query || '').toLowerCase().includes(HUMANS_FILTER_TERM.toLowerCase());
+}
+
+function removeHumansFilter(query) {
+  let next = String(query || '');
+  next = next.replace(new RegExp(`\\s+AND\\s+${escapeRegex(HUMANS_FILTER_TERM)}`, 'ig'), '');
+  next = next.replace(new RegExp(`${escapeRegex(HUMANS_FILTER_TERM)}\\s+AND\\s+`, 'ig'), '');
+  next = next.replace(new RegExp(escapeRegex(HUMANS_FILTER_TERM), 'ig'), '');
+  next = next.replace(/\(\s*\)/g, '');
+  next = next.replace(/\s{2,}/g, ' ').trim();
+  next = next.replace(/\(\s+/g, '(').replace(/\s+\)/g, ')');
+  next = next.replace(/\s+(AND|OR)\s*$/i, '').replace(/^(AND|OR)\s+/i, '');
+  return next;
+}
+
+function addHumansFilter(query) {
+  const cleaned = removeHumansFilter(query);
+  if (!cleaned) return HUMANS_FILTER_TERM;
+  return `${cleaned} AND ${HUMANS_FILTER_TERM}`;
+}
+
+function syncHumansCheckboxFromQuery(query) {
+  if (!$.humansOnly) return;
+  $.humansOnly.checked = hasHumansFilter(query);
+}
+
+function applyHumansFilterToggle(checked) {
+  const currentQuery = $.query.value.trim();
+  const nextQuery = checked ? addHumansFilter(currentQuery) : removeHumansFilter(currentQuery);
+  $.query.value = nextQuery;
+  state.query = nextQuery;
+  syncHumansCheckboxFromQuery(nextQuery);
+}
+
 /* ============================================================
    Core Flow: Analyze → Search → AI Select → Summarize → Report
    ============================================================ */
@@ -483,12 +520,8 @@ async function analyze() {
     state.pico = result.pico || state.pico;
     state.query = result.query || '';
 
-    // Fill form
-    $.picoP.value = state.pico.p;
-    $.picoI.value = state.pico.i;
-    $.picoC.value = state.pico.c;
-    $.picoO.value = state.pico.o;
     $.query.value = state.query;
+    syncHumansCheckboxFromQuery(state.query);
     state.articles = [];
     state.selectedPmids = [];
     state.abstractSummary = '';
@@ -514,11 +547,6 @@ async function confirmAndSearch(options = {}) {
     return;
   }
   const allowSparse = Boolean(options.allowSparse);
-  // Sync from form
-  state.pico.p = $.picoP.value.trim();
-  state.pico.i = $.picoI.value.trim();
-  state.pico.c = $.picoC.value.trim();
-  state.pico.o = $.picoO.value.trim();
   state.query = $.query.value.trim();
   state.searchLimit = effectiveSearchLimit($.searchLimit.value);
   $.searchLimit.value = String(state.searchLimit);
@@ -620,11 +648,8 @@ function escapeHtml(text) {
 
 function syncSearchFormFromState() {
   $.question.value = state.question || $.question.value || '';
-  $.picoP.value = state.pico.p || '';
-  $.picoI.value = state.pico.i || '';
-  $.picoC.value = state.pico.c || '';
-  $.picoO.value = state.pico.o || '';
   $.query.value = state.query || '';
+  syncHumansCheckboxFromQuery(state.query || '');
   state.searchLimit = effectiveSearchLimit(state.searchLimit || DEFAULT_SEARCH_LIMIT);
   $.searchLimit.value = String(state.searchLimit);
   setTimeFilterValue(state.fromYear || '5');
@@ -811,6 +836,13 @@ function bindEvents() {
   $.newQuestionBtn.addEventListener('click', newQuestion);
   $.exportBtn.addEventListener('click', exportReport);
   $.errorDismiss.addEventListener('click', hideError);
+  $.humansOnly.addEventListener('change', () => {
+    applyHumansFilterToggle($.humansOnly.checked);
+    saveState();
+  });
+  $.query.addEventListener('input', () => {
+    syncHumansCheckboxFromQuery($.query.value);
+  });
 
   // Click app title to go back to step 1
   document.querySelector('.app-title').addEventListener('click', () => {

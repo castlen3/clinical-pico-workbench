@@ -48,6 +48,13 @@
             <label>AI 建議 PubMed 查詢式</label>
             <textarea id="query" class="form-input" rows="3"></textarea>
           </div>
+          <div class="form-group">
+            <label class="checkbox-row" for="humans-only">
+              <input id="humans-only" type="checkbox">
+              <span>只看人體研究</span>
+            </label>
+            <p class="field-hint">勾選後會直接在 PubMed 查詢式補上 <code>humans[MeSH Terms]</code>。</p>
+          </div>
           <div class="form-row">
             <div class="form-group form-group-half">
               <label>時間範圍</label>
@@ -70,28 +77,6 @@
               </select>
             </div>
           </div>
-
-          <details class="advanced-pico">
-            <summary>調整 PICO（進階，可不填）</summary>
-            <div class="pico-grid">
-              <div class="form-group">
-                <label>P（族群）</label>
-                <input id="pico-p" class="form-input" type="text">
-              </div>
-              <div class="form-group">
-                <label>I（介入）</label>
-                <input id="pico-i" class="form-input" type="text">
-              </div>
-              <div class="form-group">
-                <label>C（比較）</label>
-                <input id="pico-c" class="form-input" type="text">
-              </div>
-              <div class="form-group">
-                <label>O（結果）</label>
-                <input id="pico-o" class="form-input" type="text">
-              </div>
-            </div>
-          </details>
 
           <div id="search-notice" class="search-notice" style="display:none">
             <div id="search-notice-title" class="search-notice-title"></div>

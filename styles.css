@@ -292,6 +292,33 @@ body {
   font-weight: 500;
 }
 
+.checkbox-row {
+  display: inline-flex !important;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px !important;
+  color: var(--text) !important;
+  cursor: pointer;
+}
+
+.checkbox-row input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.field-hint {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.field-hint code {
+  color: var(--accent);
+}
+
 .form-input {
   width: 100%;
   background: rgba(255, 255, 255, 0.04);
@@ -338,42 +365,6 @@ select.form-input {
 
 .form-group-half {
   flex: 1;
-}
-
-.advanced-pico {
-  margin: 6px 0 16px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: rgba(255, 255, 255, 0.02);
-  overflow: hidden;
-  transition: border-color 0.3s;
-}
-
-.advanced-pico:hover {
-  border-color: rgba(255, 255, 255, 0.12);
-}
-
-.advanced-pico summary {
-  min-height: 44px;
-  padding: 12px 14px;
-  color: var(--muted);
-  font-size: 14px;
-  font-weight: 600;
-  cursor: pointer;
-  list-style-position: inside;
-  transition: color 0.2s;
-}
-
-.advanced-pico summary:hover {
-  color: var(--text);
-}
-
-.advanced-pico[open] {
-  padding-bottom: 4px;
-}
-
-.advanced-pico .pico-grid {
-  padding: 0 14px 10px;
 }
 
 .search-notice {
