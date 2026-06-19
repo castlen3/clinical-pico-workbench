@@ -4,6 +4,36 @@ Mobile-first clinical literature assistant for turning a clinical question into 
 
 This project is designed to run locally first: a static vanilla JS frontend, a Python standard-library HTTP server, PubMed E-utilities, and any OpenAI-compatible LLM endpoint.
 
+## Demo
+
+Example question: **「生物素對落髮治療有幫助嗎？」**
+
+<p>
+  <img src="docs/demo/01-query.jpeg" alt="Clinical question to PubMed query" width="260">
+  <img src="docs/demo/02-progress.jpeg" alt="Progress while generating final answer" width="260">
+  <img src="docs/demo/03-result.jpeg" alt="Evidence summary result" width="260">
+</p>
+
+## Who Is This For?
+
+Clinical PICO Workbench is useful when you want a quick evidence-oriented check before spending time on a full review.
+
+For clinicians and healthcare workers:
+
+- Quickly turn a clinical question into a PubMed-oriented search.
+- Get a first-pass screen of recent papers with PMID links.
+- Use it for quick myth-busting, patient education prep, or deciding whether a claim deserves deeper review.
+
+For general readers:
+
+- Ask everyday health questions in plain language.
+- See whether the first layer of PubMed evidence supports, weakens, or complicates a popular claim.
+- Export the result as Markdown for notes or discussion with a professional.
+
+Compared with a normal Google search, this tool tries to reduce SEO/blog noise by starting from PubMed, keeping PMID links visible, and forcing the answer to say what was actually searched and reviewed. It is best used as a fast evidence triage tool, not as a final clinical decision engine.
+
+For anything high-stakes, controversial, or practice-changing, use this only as the first pass. Read the source papers, check guidelines, and do a deeper structured review.
+
 ## Features
 
 - Mobile-first workflow for quick clinical PICO-style searches
