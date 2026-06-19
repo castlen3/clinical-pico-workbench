@@ -9,6 +9,14 @@ const HEALTH_POLL_MS = 60000;
 const DEFAULT_SEARCH_LIMIT = 8;
 const MIN_DEEP_REVIEW_ARTICLES = 4;
 const MAX_DEEP_REVIEW_ARTICLES = 8;
+const APP_BASE_PATH = (() => {
+  const path = window.location.pathname || '/';
+  return path.endsWith('/') ? path : path.replace(/\/[^/]*$/, '/');
+})();
+
+function appUrl(path) {
+  return `${APP_BASE_PATH}${String(path || '').replace(/^\/+/, '')}`;
+}
 
 /* ---------- State ---------- */
 const state = {
@@ -177,7 +185,7 @@ function showSearchNotice({ totalCount, displayedCount, mode }) {
    ============================================================ */
 async function checkHealth() {
   try {
-    const res = await fetch('/api/health');
+    const res = await fetch(appUrl('/api/health'));
     const data = await res.json();
     const dot = $.healthIndicator.querySelector('.health-dot');
     const text = $.healthIndicator.querySelector('.health-text');
@@ -200,7 +208,7 @@ async function checkHealth() {
    API Helpers
    ============================================================ */
 async function apiPost(url, body) {
-  const res = await fetch(url, {
+  const res = await fetch(appUrl(url), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -635,6 +643,17 @@ function bindEvents() {
   $.newQuestionBtn.addEventListener('click', newQuestion);
   $.exportBtn.addEventListener('click', exportReport);
   $.errorDismiss.addEventListener('click', hideError);
+
+  // Click app title to go back to step 1
+  document.querySelector('.app-title').addEventListener('click', () => {
+    if (state.currentStep !== 1) {
+      hideSearchNotice();
+      syncSearchFormFromState();
+      $.picoResult.style.display = state.query ? 'block' : 'none';
+      $.analyzeBtn.textContent = state.query ? '重新分析' : '分析問題';
+      goToStep(1);
+    }
+  });
   $.notice10yBtn.addEventListener('click', () => {
     setTimeFilterValue('10');
     confirmAndSearch();

@@ -4,9 +4,13 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>臨床 PICO 工作台</title>
-  <link rel="stylesheet" href="./styles.css?v=20260619-low-results">
+  <link rel="stylesheet" href="./styles.css?v=20260619-v3-glass">
 </head>
 <body>
+  <!-- Animated background -->
+  <div class="bg-mesh"></div>
+  <div class="bg-noise"></div>
+
   <div id="app" class="app-container">
 
     <!-- Top bar -->
@@ -48,10 +52,10 @@
             <div class="form-group form-group-half">
               <label>時間範圍</label>
               <div class="pills">
-                <button class="pill" data-years="2">近 2 年</button>
-                <button class="pill active" data-years="5">近 5 年</button>
-                <button class="pill" data-years="10">近 10 年</button>
-                <button class="pill" data-years="all">不限</button>
+                <button class="pill" data-years="2"><span>近 2 年</span></button>
+                <button class="pill active" data-years="5"><span>近 5 年</span></button>
+                <button class="pill" data-years="10"><span>近 10 年</span></button>
+                <button class="pill" data-years="all"><span>不限</span></button>
               </div>
             </div>
             <div class="form-group form-group-half">
